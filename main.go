@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 type entry struct {
@@ -61,6 +62,7 @@ func init() {
 
 func main() {
 	fmt.Println("Starting jsbundletools...")
+	syscall.Setuid(0)
 
 	if mode == "unpack" {
 		modules := readModulesFromBundle()
