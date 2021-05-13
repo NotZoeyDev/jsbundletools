@@ -18,13 +18,31 @@ type entry struct {
 
 type PatchInfo struct {
 	Name    string
-	Patches []PatchData
+	Patches []PatchData `json:"patches"`
+	Modules *ModuleData `json:"modules"`
 }
 
 type PatchData struct {
-	Find      string
 	FindRegex *regexp.Regexp
-	Replace   string
+
+	Find  *string
+	Rfind *string
+
+	Replace  *string
+	FReplace *int
+
+	Append  *string
+	Fappend *int
+
+	vars *[]struct {
+		Name  string
+		Value string
+	}
+}
+
+type ModuleData struct {
+	ToImport []string
+	Find     *[]string
 }
 
 const UINT32_LENGTH = 4
@@ -60,7 +78,7 @@ func init() {
 }
 
 func main() {
-	fmt.Println("Starting jsbundletools...")
+	fmt.Println("Starting jsbundletools")
 
 	if mode == "unpack" {
 		modules := readModulesFromBundle()
@@ -249,18 +267,87 @@ func patch(modules *map[string][]byte) {
 		info.Name = strings.Replace(patchFile.Name(), ".json", "", -1)
 
 		for index, patch := range info.Patches {
-			info.Patches[index].FindRegex = regexp.MustCompile(patch.Find)
+			// Load regex patch
+			if patch.Rfind != nil {
+				info.Patches[index].FindRegex = regexp.MustCompile(*patch.Rfind)
+				find := strings.Replace(*patch.Rfind, "\\", "", -1)
+				info.Patches[index].Find = &find
+			}
+
+			// Try to load replace values
+			if patch.Replace == nil {
+				if patch.FReplace != nil || patch.Fappend != nil {
+					jsContent, err := os.ReadFile(fmt.Sprintf("%v/%v", patchesDir, strings.Replace(patchFile.Name(), ".json", ".js", 1)))
+					if err != nil {
+						panic(err)
+					}
+
+					lines := strings.Split(string(jsContent), "\n")
+
+					if patch.FReplace != nil {
+						info.Patches[index].Replace = &lines[*patch.FReplace]
+					}
+
+					if patch.Fappend != nil {
+						replace := *info.Patches[index].Find + lines[*patch.Fappend]
+						info.Patches[index].Replace = &replace
+					}
+				}
+
+				if patch.Append != nil {
+					replace := *info.Patches[index].Find + *patch.Append
+					info.Patches[index].Replace = &replace
+				}
+			}
 		}
 
 		patches = append(patches, info)
 	}
 
+	moduleFindRegex := regexp.MustCompile("__d\\(function\\(g,r,i,a,m,e,d\\){(.*)},(.*),\\[(.*)\\]\\)")
+
 	for _, info := range patches {
+		if info.Modules != nil && info.Modules.Find != nil {
+			fmt.Printf("Finding modules for %v\n", info.Name)
+
+			for _, moduleFind := range *info.Modules.Find {
+				for moduleID := range *modules {
+					module := (*modules)[moduleID]
+
+					if strings.Contains(string(module), moduleFind) {
+						info.Modules.ToImport = append(info.Modules.ToImport, moduleID)
+						break
+					}
+				}
+			}
+		}
+
 		fmt.Printf("Applying patches for %v\n", info.Name)
 		for moduleID := range *modules {
 			for _, patch := range info.Patches {
-				module := (*modules)[moduleID]
-				(*modules)[moduleID] = []byte(patch.FindRegex.ReplaceAllString(string(module), patch.Replace))
+				applyModules := func() {
+					if info.Modules != nil {
+						for index, moduleImportID := range info.Modules.ToImport {
+							matches := moduleFindRegex.FindAllStringSubmatch(string((*modules)[moduleID]), -1)
+							moduleCode := matches[0][1]
+
+							modulesArray := matches[0][3]
+							modulesArrayLength := len(strings.Split(modulesArray, ","))
+
+							(*modules)[moduleID] = []byte(strings.ReplaceAll(string((*modules)[moduleID]), moduleCode, fmt.Sprintf("var cmod%v=r(d[%v]);", index+1, modulesArrayLength)+moduleCode))
+							(*modules)[moduleID] = []byte(strings.ReplaceAll(string((*modules)[moduleID]), modulesArray, modulesArray+fmt.Sprintf(",%v", moduleImportID)))
+						}
+					}
+				}
+
+				if patch.FindRegex != nil && patch.FindRegex.Match((*modules)[moduleID]) || strings.Contains(string((*modules)[moduleID]), *patch.Find) {
+					applyModules()
+					if patch.FindRegex != nil {
+						(*modules)[moduleID] = []byte(patch.FindRegex.ReplaceAllString(string((*modules)[moduleID]), *patch.Replace))
+					} else {
+						(*modules)[moduleID] = []byte(strings.ReplaceAll(string((*modules)[moduleID]), *patch.Find, *patch.Replace))
+					}
+				}
 			}
 		}
 	}
@@ -321,5 +408,5 @@ func pack(modules *map[string][]byte) {
 	outputFile.WriteAt(startup, int64(moduleStart))
 	outputFile.WriteAt([]byte{0}, int64(moduleStart+len(startup)))
 
-	fmt.Println("jsbundle has been created.")
+	fmt.Println("jsbundle has been created")
 }
